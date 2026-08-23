@@ -17,6 +17,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileWriter
+import java.io.PrintWriter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -40,7 +46,44 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater); setContentView(binding.root)
+
+        // 安装全局崩溃捕获器，闪退时写日志到 /sdcard/
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                val crashFile = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "BD2ModDeployer_crash_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.log"
+                )
+                FileWriter(crashFile).use { fw ->
+                    PrintWriter(fw).use { pw ->
+                        pw.println("=== CRASH REPORT ===")
+                        pw.println("Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
+                        pw.println("Thread: ${thread.name}")
+                        pw.println("Message: ${throwable.message}")
+                        pw.println("Stack trace:")
+                        throwable.printStackTrace(pw)
+                        // 也打印 cause chain
+                        var cause = throwable.cause
+                        var depth = 0
+                        while (cause != null && depth < 10) {
+                            pw.println("\nCaused by: ${cause.message}")
+                            cause.printStackTrace(pw)
+                            cause = cause.cause
+                            depth++
+                        }
+                    }
+                }
+                Log.e("BD2Deployer", "Crash written to ${crashFile.absolutePath}", throwable)
+            } catch (_: Exception) {
+                // 写日志本身也崩了就不管了
+            }
+            // 继续默认行为（杀掉进程）
+            val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+            if (defaultHandler != this) defaultHandler?.uncaughtException(thread, throwable)
+        }
+
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
 
         // 初始化 Shizuku（双通道：Shizuku 免 root / root 兜底）
         ShizukuHelper.init(this)
@@ -55,6 +98,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume(); refreshStatus()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
     }
 
     // ====================== 状态刷新 ======================
@@ -73,7 +120,7 @@ class MainActivity : AppCompatActivity() {
         if (rootAvailable) sb.append(" · Root 可用")
         log(sb.toString())
 
-        // Shizuku 在线但未授权时自动发起授权请求
+        // 如果 Shizuku 在线但未授权，自动弹出授权申请
         if (shizukuOnline && !granted) {
             ShizukuHelper.requestPermission()
         }
@@ -94,17 +141,59 @@ class MainActivity : AppCompatActivity() {
 
     // ====================== 部署流程 ======================
     private fun onDeploy() {
+        // 安全获取包名
+        val pkg = runCatching { getString(R.string.target_package) }.getOrNull()
+        if (pkg.isNullOrBlank()) {
+            toast("strings.xml 缺少 target_package")
+            return
+        }
+
         val src = modSourceTree
-        if (src == null) { toast("请先选择 Mod 源文件夹"); return }
+        if (src == null) {
+            toast("请先选择 Mod 源文件夹")
+            return
+        }
 
         // ---- 权限检查 + 引导 ----
         if (!ShizukuHelper.hasPermission()) {
             if (ShizukuHelper.isShizukuAvailable()) {
-                showShizukuGuideDialog()
+                // Shizuku 在线但未授权 → 弹窗引导去 Shizuku 应用授权
+                AlertDialog.Builder(this)
+                    .setTitle("需要 Shizuku 授权")
+                    .setMessage("本应用需要通过 Shizuku 获取文件操作权限。\n\n" +
+                            "请按以下步骤操作：\n" +
+                            "1. 确保已开启 Shizuku（无线调试 / ADB 启动）\n" +
+                            "2. 在弹出的 Shizuku 授权窗口中点击「允许」\n" +
+                            "3. 若未弹出授权窗口，请手动打开 Shizuku App，\n" +
+                            "   在本应用的授权列表中授予权限\n\n" +
+                            "授权后再次点击部署按钮即可。")
+                    .setPositiveButton("去授权") { _, _ ->
+                        // 再次触发授权请求
+                        ShizukuHelper.requestPermission()
+                        // 同时尝试打开 Shizuku 应用（方便用户手动授权）
+                        try {
+                            startActivity(packageManager.getLaunchIntentForPackage("moe.shizuku.manager"))
+                        } catch (_: Exception) {
+                            toast("请手动打开 Shizuku 应用授权")
+                        }
+                    }
+                    .setNegativeButton("稍后再说", null)
+                    .show()
             } else if (ShizukuHelper.isRootAvailable()) {
+                // 有 root 就直接用 root
                 toast("使用 Root 权限执行")
             } else {
-                showNoEnvDialog()
+                // 啥都没有
+                AlertDialog.Builder(this)
+                    .setTitle("无可用的执行环境")
+                    .setMessage("本应用需要以下任一环境才能工作：\n\n" +
+                            "① Shizuku（推荐，免 Root）\n" +
+                            "   安装 Shizuku App 并通过无线调试启动\n\n" +
+                            "② Root 权限\n" +
+                            "   设备已 Root 且授权本应用\n\n" +
+                            "请配置后再试。")
+                    .setPositiveButton("了解", null)
+                    .show()
             }
             return
         }
@@ -113,25 +202,41 @@ class MainActivity : AppCompatActivity() {
         scope.launch {
             val gameShared = "$gameRoot/${BackupManager.SHARED_REL}"
 
+            // 1) 扫描源目录顶层子项
             val entries = withContext(Dispatchers.IO) {
                 src.listFiles().orEmpty().map { it.name ?: "" }.filter { it.isNotEmpty() }
             }
-            if (entries.isEmpty()) { toast("源目录为空"); return@launch }
+            if (entries.isEmpty()) {
+                toast("源目录为空")
+                return@launch
+            }
 
+            // 2) 先备份
             log("开始备份将被替换的 ${entries.size} 项...")
-            val slot = withContext(Dispatchers.IO) { backupMgr.backup(entries, gameRoot) }
+            val slot = withContext(Dispatchers.IO) {
+                backupMgr.backup(entries, gameRoot)
+            }
             log("备份槽：${slot.name}（${slot.entries.count { it.backupSuccess }}/${slot.entries.size} 项有原文件）")
 
+            // 3) 逐个复制
             var fail = 0
             withContext(Dispatchers.IO) {
                 src.listFiles()?.forEach { doc ->
                     val name = doc.name ?: return@forEach
                     val real = realPathFromTreeUri(doc)
-                    if (real.isNullOrBlank()) { fail++; log("跳过(无法解析路径): $name"); return@forEach }
+                    if (real.isNullOrBlank()) {
+                        fail++
+                        log("跳过(无法解析路径): $name")
+                        return@forEach
+                    }
                     val dst = "$gameShared/$name"
                     val res = ShizukuHelper.run("mkdir -p '$dst' && cp -a '$real' '$dst'")
-                    if (res == null || !res.third) { fail++; log("部署失败: $name") }
-                    else log("部署: $name ✓")
+                    if (res == null || !res.third) {
+                        fail++
+                        log("部署失败: $name")
+                    } else {
+                        log("部署: $name ✓")
+                    }
                 }
             }
             log("部署完成（成功 ${entries.size - fail}/$fail 失败）。可在「备份/恢复」中一键还原。")
@@ -139,7 +244,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** SAF DocumentFile 的 tree URI -> 真实文件系统路径（默认源在 /storage/emulated/0 下）。 */
+    /**
+     * 将 SAF DocumentFile 的 tree URI 解析为真实文件系统路径。
+     */
     private fun realPathFromTreeUri(doc: DocumentFile): String? {
         val p = doc.uri.path ?: return null
         val seg = p.substringAfter("document/", "")
@@ -155,14 +262,18 @@ class MainActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setTitle("备份管理")
                 .setMessage("暂无备份记录。\n部署 Mod 时会自动备份被替换的目录。")
-                .setPositiveButton("OK", null).show()
+                .setPositiveButton("OK", null)
+                .show()
             return
         }
-        val items = slots.map { "${it.name}  ·  ${it.formattedTime()}  ·  ${it.entries.size} 项" }.toTypedArray()
+        val items = slots.map {
+            "${it.name}  ·  ${it.formattedTime()}  ·  ${it.entries.size} 项"
+        }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("备份/恢复（按时间倒序）")
             .setItems(items) { _, which -> showSlotAction(slots[which]) }
-            .setNegativeButton("取消", null).show()
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun showSlotAction(slot: BackupManager.BackupSlot) {
@@ -173,16 +284,33 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("删除该备份") { _, _ ->
                 if (backupMgr.delete(slot)) toast("已删除备份 ${slot.name}") else toast("删除失败")
             }
-            .setNeutralButton("取消", null).show()
+            .setNeutralButton("取消", null)
+            .show()
     }
 
     private fun restoreSlot(slot: BackupManager.BackupSlot) {
+        // 同样先检查权限
         if (!ShizukuHelper.hasPermission()) {
-            if (ShizukuHelper.isShizukuAvailable()) showShizukuGuideDialog()
-            else if (ShizukuHelper.isRootAvailable()) toast("使用 Root 权限执行")
-            else toast("无可用的执行环境")
+            if (ShizukuHelper.isShizukuAvailable()) {
+                AlertDialog.Builder(this)
+                    .setTitle("需要 Shizuku 授权")
+                    .setMessage("恢复备份也需要 Shizuku 权限，请先授权。")
+                    .setPositiveButton("去授权") { _, _ ->
+                        ShizukuHelper.requestPermission()
+                        try {
+                            startActivity(packageManager.getLaunchIntentForPackage("moe.shizuku.manager"))
+                        } catch (_: Exception) {}
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+            } else if (ShizukuHelper.isRootAvailable()) {
+                toast("使用 Root 权限执行")
+            } else {
+                toast("无可用的执行环境")
+            }
             return
         }
+
         scope.launch {
             val ok = withContext(Dispatchers.IO) { backupMgr.restore(slot, gameRoot) }
             log(if (ok) "已恢复备份 ${slot.name}" else "恢复备份 ${slot.name} 部分失败，请查看日志")
@@ -190,38 +318,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ====================== 对话框 ======================
-    private fun showShizukuGuideDialog() {
-        AlertDialog.Builder(this)
-            .setTitle("需要 Shizuku 授权")
-            .setMessage("本应用需要通过 Shizuku 获取文件操作权限（免 Root）。\n\n" +
-                    "请按以下步骤操作：\n" +
-                    "1. 确保已开启 Shizuku（无线调试 / ADB 启动）\n" +
-                    "2. 在弹出的 Shizuku 授权窗口中点击「允许」\n" +
-                    "3. 若未弹出，请手动打开 Shizuku App，在本应用授权列表中授予权限\n\n" +
-                    "授权后再次点击部署按钮即可。")
-            .setPositiveButton("去授权") { _, _ ->
-                ShizukuHelper.requestPermission()
-                try {
-                    startActivity(packageManager.getLaunchIntentForPackage("moe.shizuku.manager"))
-                } catch (_: Exception) { toast("请手动打开 Shizuku 应用授权") }
-            }
-            .setNegativeButton("稍后再说", null).show()
-    }
-
-    private fun showNoEnvDialog() {
-        AlertDialog.Builder(this)
-            .setTitle("无可用的执行环境")
-            .setMessage("本应用需要以下任一环境才能工作：\n\n" +
-                    "① Shizuku（推荐，免 Root）\n" +
-                    "   安装 Shizuku App 并通过无线调试启动\n\n" +
-                    "② Root 权限\n" +
-                    "   设备已 Root 且授权本应用\n\n" +
-                    "请配置后再试。")
-            .setPositiveButton("了解", null).show()
-    }
-
     // ====================== 工具 ======================
-    private fun log(s: String) { Log.i("BD2Deployer", s); binding.tvLog.append("$s\n") }
+    private fun log(s: String) {
+        Log.i("BD2Deployer", s)
+        binding.tvLog.append("$s\n")
+    }
+
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 }
