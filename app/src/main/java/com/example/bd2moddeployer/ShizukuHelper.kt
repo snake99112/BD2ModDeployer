@@ -2,92 +2,112 @@ package com.example.bd2moddeployer
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import rikka.shizuku.Shizuku
-import java.lang.reflect.Method
+import java.io.BufferedReader
+import java.io.InputStreamReader
 
 /**
- * 双通道执行助手：
- *  - 优先 Shizuku（adb/shell 身份，免 Root）执行 shell 命令
- *  - Shizuku 不可用/未授权时回落到 Root (su)
- *
- * 说明：
- *  Shizuku 13.x 的 newProcess 为 private，本类通过反射调用，
- *  避免在 MainActivity 中直接 import 已不可见的 API。
+ * Shizuku + Root 双通道辅助。
+ * - Shizuku 在线且已授权：用 Shizuku 的 UserService 执行 shell
+ * - 否则若 Root 可用：用 su 执行
+ * - 都不可用：返回 null
  */
 object ShizukuHelper {
-    const val PERM_CODE = 1001
 
-    @Volatile private var shizukuReady = false
-    @Volatile private var rootReady = false
+    var shizukuReady = false
+    var rootReady = false
+    private var permRequested = false
 
-    // ---------- 初始化 ----------
     fun init(ctx: Context) {
         try {
-            Shizuku.addBinderReceivedListenerSticky(object : Shizuku.OnBinderReceivedListener {
-                override fun onBinderReceived() {
-                    shizukuReady = Shizuku.pingBinder()
-                }
-            })
-            Shizuku.addBinderDeadListener(object : Shizuku.OnBinderDeadListener {
-                override fun onBinderDead() { shizukuReady = false }
-            })
             shizukuReady = Shizuku.pingBinder()
-        } catch (e: Throwable) {
-            shizukuReady = false
-        }
-        rootReady = checkRoot()
+        } catch (_: Throwable) { shizukuReady = false }
+        try {
+            rootReady = checkRoot()
+        } catch (_: Throwable) { rootReady = false }
     }
 
-    private fun checkRoot(): Boolean = try {
-        val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "echo ok"))
-        p.inputStream.bufferedReader().readLine() == "ok"
-    } catch (_: Throwable) { false }
-
-    // ---------- 状态查询 ----------
-    fun isShizukuAvailable(): Boolean = shizukuReady
+    fun isShizukuAvailable(): Boolean = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
     fun isRootAvailable(): Boolean = rootReady
 
-    fun hasPermission(): Boolean =
-        if (shizukuReady) Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-        else rootReady
+    fun hasPermission(): Boolean {
+        return if (isShizukuAvailable()) {
+            try {
+                Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            } catch (_: Throwable) { false }
+        } else true // root 通道不需要运行时权限
+    }
 
     fun requestPermission() {
-        if (shizukuReady && Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            Shizuku.requestPermission(PERM_CODE)
+        if (!isShizukuAvailable()) return
+        try {
+            // Shizuku 13+ 新 API：requestPermission(int, OnRequestPermissionResultListener)
+            Shizuku.requestPermission(1001, object : Shizuku.OnRequestPermissionResultListener {
+                override fun onRequestPermissionResult(code: Int, result: Int) {
+                    permRequested = (code == 1001)
+                }
+            })
+        } catch (_: Throwable) {
+            // 旧版 API 兼容
+            try { Shizuku::class.java.getMethod("requestPermission", Int::class.javaPrimitiveType)
+                .invoke(null, 1001) } catch (_: Throwable) { }
         }
     }
 
-    // ---------- 核心：执行 shell ----------
     /**
-     * 返回 Triple(stdout, stderr, exitOk)；
-     * 优先 Shizuku（免 root），否则 root，都没有返回 null。
+     * 执行 shell 命令，返回 (stdout, stderr, success)。
+     * 优先 Shizuku，其次 Root。
      */
-    fun run(cmd: String): Triple<String?, String?, Boolean>? {
-        if (shizukuReady && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+    fun run(cmd: String): Triple<String, String, Boolean>? {
+        // 尝试 Shizuku
+        if (isShizukuAvailable() && hasPermission()) {
             try {
-                val p = newProcess(arrayOf("sh", "-c", cmd))
-                val out = p.inputStream.bufferedReader().use { it.readText() }
-                val err = p.errorStream.bufferedReader().use { it.readText() }
-                p.waitFor()
-                return Triple(out, err, true)
-            } catch (e: Throwable) { /* fallthrough to root */ }
+                val res = runShizuku(cmd)
+                if (res != null) return res
+            } catch (_: Throwable) { }
         }
+        // 尝试 Root
         if (rootReady) {
-            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-            val out = p.inputStream.bufferedReader().use { it.readText() }
-            val err = p.errorStream.bufferedReader().use { it.readText() }
-            p.waitFor()
-            return Triple(out, err, true)
+            try {
+                val res = runSu(cmd)
+                if (res != null) return res
+            } catch (_: Throwable) { }
         }
         return null
     }
 
-    /** 反射调用 private Shizuku.newProcess(String[] command, String[] env, String dir)。 */
-    private fun newProcess(args: Array<String>): Process {
-        val m: Method = Shizuku::class.java.getDeclaredMethod(
-            "newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java
-        )
-        m.isAccessible = true
-        return m.invoke(null, args, null, null) as Process
+    private fun runShizuku(cmd: String): Triple<String, String, Boolean>? {
+        // Shizuku 13+ 通过 SystemServiceHelper 获取 shell 用户服务
+        return try {
+            val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
+            val stdout = BufferedReader(InputStreamReader(process.inputStream)).use { it.readText() }
+            val stderr = BufferedReader(InputStreamReader(process.errorStream)).use { it.readText() }
+            val exit = process.waitFor()
+            Triple(stdout, stderr, exit == 0)
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    private fun runSu(cmd: String): Triple<String, String, Boolean>? {
+        return try {
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+            val stdout = BufferedReader(InputStreamReader(process.inputStream)).use { it.readText() }
+            val stderr = BufferedReader(InputStreamReader(process.errorStream)).use { it.readText() }
+            val exit = process.waitFor()
+            Triple(stdout, stderr, exit == 0)
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    private fun checkRoot(): Boolean {
+        return try {
+            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val exit = proc.waitFor()
+            exit == 0
+        } catch (_: Throwable) { false }
     }
 }

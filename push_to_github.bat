@@ -1,6 +1,6 @@
 @echo off
 REM push_to_github.bat —— Windows 一键推送（先编辑 YOUR_USER / BD2ModDeployer）
-set GITHUB_USER=snake99112
+set GITHUB_USER=YOUR_USER
 set GITHUB_REPO=BD2ModDeployer
 set REMOTE=https://github.com/%GITHUB_USER%/%GITHUB_REPO%.git
 

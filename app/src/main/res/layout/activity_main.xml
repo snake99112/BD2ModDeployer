@@ -1,64 +1,96 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="16dp">
+    android:layout_height="match_parent">
 
-    <TextView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="@string/app_title"
-        android:textSize="20sp"
-        android:textStyle="bold"
-        android:layout_marginBottom="4dp"/>
+        android:orientation="vertical"
+        android:padding="16dp">
 
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/app_subtitle"
-        android:textSize="12sp"
-        android:layout_marginBottom="12dp"/>
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="BD2 Mod Deployer"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:gravity="center"
+            android:layout_marginBottom="12dp" />
 
-    <Button
-        android:id="@+id/btnPickMod"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/btn_pick_mod"/>
+        <Button
+            android:id="@+id/btnPickMod"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="选择 Mod 源文件夹" />
 
-    <TextView
-        android:id="@+id/tvSelected"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:textSize="12sp"
-        android:layout_marginTop="6dp"/>
+        <Button
+            android:id="@+id/btnPickTarget"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="选择游戏目标目录（SAF，可选）"
+            android:layout_marginTop="4dp" />
 
-    <Button
-        android:id="@+id/btnDeploy"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/btn_deploy"
-        android:layout_marginTop="8dp"/>
+        <Button
+            android:id="@+id/btnDeploy"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="部署 Mod"
+            android:layout_marginTop="8dp" />
 
-    <Button
-        android:id="@+id/btnBackupRestore"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/btn_backup_restore"
-        android:layout_marginTop="8dp"/>
+        <Button
+            android:id="@+id/btnBackupRestore"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="备份 / 恢复"
+            android:layout_marginTop="4dp" />
 
-    <ScrollView
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:layout_marginTop="12dp">
+        <TextView
+            android:id="@+id/tvSelected"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="源：未选择"
+            android:textSize="12sp"
+            android:layout_marginTop="8dp" />
+
+        <TextView
+            android:id="@+id/tvBackupPath"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="目标：未设置"
+            android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/tvProgress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="进度：-"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#33000000"
+            android:layout_marginVertical="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="日志："
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
         <TextView
             android:id="@+id/tvLog"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:fontFamily="monospace"
-            android:textSize="11sp"
+            android:textSize="10sp"
+            android:maxHeight="300dp"
+            android:scrollbars="vertical"
             android:background="#11000000"
-            android:padding="8dp"/>
-    </ScrollView>
-</LinearLayout>
+            android:padding="4dp" />
+
+    </LinearLayout>
+</ScrollView>

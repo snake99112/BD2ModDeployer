@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.Bundle
+import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -33,20 +34,31 @@ class MainActivity : AppCompatActivity() {
     /** 游戏目标目录（固定路径） */
     private val gameTargetDir = "/storage/emulated/0/Android/data/com.neowizgames.game.browndust2/files/UnityCache/Shared"
 
-    /** 已选 Mod 源目录的 DocumentFile（SAF 树 URI）。 */
+    /** Mod 源目录（SAF 树 URI） */
     private var modSourceTree: DocumentFile? = null
 
-    private val pickTree = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+    /** 用户已授权的游戏目标目录（SAF 树 URI），用于纯 SAF 通道 */
+    private var gameTargetTree: DocumentFile? = null
+
+    private val pickModTree = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri == null) return@registerForActivityResult
         contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         modSourceTree = DocumentFile.fromTreeUri(this, uri)
-        binding.tvSelected.text = "已选源：${modSourceTree?.uri?.lastPathSegment ?: uri.path}"
+        binding.tvSelected.text = "源：${uri.path?.substringAfterLast("/") ?: uri.path}"
+    }
+
+    private val pickGameTargetTree = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        gameTargetTree = DocumentFile.fromTreeUri(this, uri)
+        log("已设置游戏目标目录：${uri.path?.substringAfterLast("/") ?: uri.path}")
+        binding.tvBackupPath.text = "目标：${uri.path?.substringAfterLast("/") ?: uri.path}"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 全局崩溃捕获
+        // 全局崩溃捕获（不递归）
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
                 val crashFile = File(
@@ -73,8 +85,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 Log.e("BD2Deployer", "Crash written to ${crashFile.absolutePath}", throwable)
             } catch (_: Exception) { }
-            val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
-            defaultHandler?.uncaughtException(thread, throwable)
+            Process.killProcess(Process.myPid())
         }
 
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -82,22 +93,44 @@ class MainActivity : AppCompatActivity() {
 
         ShizukuHelper.init(this)
 
-        binding.btnPickMod.setOnClickListener { pickTree.launch(null) }
+        binding.btnPickMod.setOnClickListener { pickModTree.launch(null) }
         binding.btnDeploy.setOnClickListener { onDeploy() }
         binding.btnBackupRestore.setOnClickListener { showBackupRestoreDialog() }
+        binding.btnPickTarget.setOnClickListener { pickGameTargetTree.launch(null) }
 
         ensureStoragePermission()
         refreshStatus()
     }
 
     override fun onResume() {
-        super.onResume(); refreshStatus()
+        super.onResume()
+        refreshStatus()
+        // 恢复已保存的目标目录 URI
+        if (gameTargetTree == null) {
+            val saved = getSharedPreferences("deploy", MODE_PRIVATE).getString("game_target_uri", null)
+            if (saved != null) {
+                try {
+                    gameTargetTree = DocumentFile.fromTreeUri(this, Uri.parse(saved))
+                } catch (_: Exception) { }
+            }
+        }
+        binding.tvBackupPath.text = if (gameTargetTree != null) {
+            "目标：${gameTargetTree!!.uri.path?.substringAfterLast("/") ?: gameTargetTree!!.uri.path}"
+        } else {
+            "目标：未设置（将使用 Shizuku/Root 通道）"
+        }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
+    override fun onPause() {
+        super.onPause()
+        // 持久化目标目录 URI
+        gameTargetTree?.let {
+            getSharedPreferences("deploy", MODE_PRIVATE).edit()
+                .putString("game_target_uri", it.uri.toString()).apply()
+        }
     }
 
+    // ====================== 状态刷新 ======================
     private fun refreshStatus() {
         val shizukuOnline = ShizukuHelper.isShizukuAvailable()
         val rootAvailable = ShizukuHelper.isRootAvailable()
@@ -112,10 +145,6 @@ class MainActivity : AppCompatActivity() {
         }
         if (rootAvailable) sb.append(" · Root 可用")
         log(sb.toString())
-
-        if (shizukuOnline && !granted) {
-            ShizukuHelper.requestPermission()
-        }
     }
 
     private fun ensureStoragePermission() {
@@ -133,157 +162,171 @@ class MainActivity : AppCompatActivity() {
 
     // ====================== 部署流程 ======================
     private fun onDeploy() {
-        val src = modSourceTree
-        if (src == null) {
+        if (modSourceTree == null) {
             toast("请先选择 Mod 源文件夹")
             return
         }
 
-        // ---- 权限检查 + 引导 ----
-        if (!ShizukuHelper.hasPermission()) {
-            if (ShizukuHelper.isShizukuAvailable()) {
-                AlertDialog.Builder(this)
-                    .setTitle("需要 Shizuku 授权")
-                    .setMessage("本应用需要通过 Shizuku 获取文件操作权限。\n\n" +
-                            "请按以下步骤操作：\n" +
-                            "1. 确保已开启 Shizuku（无线调试 / ADB 启动）\n" +
-                            "2. 在弹出的 Shizuku 授权窗口中点击「允许」\n" +
-                            "3. 若未弹出授权窗口，请手动打开 Shizuku App，\n" +
-                            "   在本应用的授权列表中授予权限\n\n" +
-                            "授权后再次点击部署按钮即可。")
-                    .setPositiveButton("去授权") { _, _ ->
-                        ShizukuHelper.requestPermission()
-                        try {
-                            startActivity(packageManager.getLaunchIntentForPackage("moe.shizuku.manager"))
-                        } catch (_: Exception) {
-                            toast("请手动打开 Shizuku 应用授权")
-                        }
-                    }
-                    .setNegativeButton("稍后再说", null)
-                    .show()
-            } else if (ShizukuHelper.isRootAvailable()) {
-                toast("使用 Root 权限执行")
-            } else {
-                AlertDialog.Builder(this)
-                    .setTitle("无可用的执行环境")
-                    .setMessage("本应用需要以下任一环境才能工作：\n\n" +
-                            "① Shizuku（推荐，免 Root）\n" +
-                            "   安装 Shizuku App 并通过无线调试启动\n\n" +
-                            "② Root 权限\n" +
-                            "   设备已 Root 且授权本应用\n\n" +
-                            "请配置后再试。")
-                    .setPositiveButton("了解", null)
-                    .show()
-            }
-            return
-        }
-
-        // ---- 有权限，开始部署 ----
         scope.launch {
-            log("=== 开始部署 ===")
-            log("目标目录: $gameTargetDir")
-
-            // 1) 扫描源目录，找到所有直接子文件夹（Mod 文件夹）
+            // 扫描源目录
             val modDirs = withContext(Dispatchers.IO) {
-                src.listFiles()
+                modSourceTree!!.listFiles()
                     ?.filter { it.isDirectory }
                     ?.map { it.name ?: "" }
                     ?.filter { it.isNotEmpty() }
                     ?: emptyList()
             }
-
             if (modDirs.isEmpty()) {
-                // 如果直接子项没有文件夹，可能是用户选了 Shared 的上层目录
-                // 尝试找 Shared 文件夹
-                val sharedFolder = src.findFile("Shared")
-                if (sharedFolder != null && sharedFolder.isDirectory) {
-                    log("检测到 Shared 文件夹，进入其内部查找 Mod 目录...")
-                    val innerDirs = withContext(Dispatchers.IO) {
-                        sharedFolder.listFiles()
-                            ?.filter { it.isDirectory }
-                            ?.map { it.name ?: "" }
-                            ?.filter { it.isNotEmpty() }
-                            ?: emptyList()
-                    }
-                    if (innerDirs.isEmpty()) {
-                        toast("Mod 源文件夹内没有找到任何 Mod 子目录")
-                        return@launch
-                    }
-                    // 用 innerDirs 继续，但源路径要指向 Shared 里面
-                    deployMods(sharedFolder, innerDirs)
-                } else {
-                    toast("Mod 源文件夹内没有找到任何 Mod 子目录")
+                toast("Mod 源文件夹内没有子目录")
+                return@launch
+            }
+            log("发现 ${modDirs.size} 个 Mod 目录：${modDirs.joinToString(", ")}")
+
+            // 先尝试纯 SAF 通道
+            val targetTree = gameTargetTree
+            if (targetTree != null) {
+                log("使用 SAF 通道部署...")
+                val ok = deployViaSaf(targetTree, modDirs)
+                if (ok) {
+                    toast("部署完成（SAF）")
                     return@launch
                 }
+                log("SAF 通道写入失败，尝试 Shizuku/Root 通道...")
+            }
+
+            // SAF 未设置或失败 -> 走 Shizuku/Root
+            if (!ShizukuHelper.hasPermission()) {
+                if (ShizukuHelper.isShizukuAvailable()) {
+                    promptShizukuAuth()
+                } else if (ShizukuHelper.isRootAvailable()) {
+                    toast("使用 Root 权限执行")
+                } else {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("需要更高权限")
+                        .setMessage("纯 SAF 方式写入游戏目录失败（权限不足）。\n\n" +
+                                "请通过以下方式之一授权：\n" +
+                                "① 点击「选择目标目录」手动指定游戏 Shared 目录\n" +
+                                "② 安装并启动 Shizuku（推荐，免 Root）\n" +
+                                "③ 确保设备已 Root\n\n" +
+                                "授权后再次点击部署。")
+                        .setPositiveButton("去授权 Shizuku") { _, _ ->
+                            ShizukuHelper.requestPermission()
+                            try { startActivity(packageManager.getLaunchIntentForPackage("moe.shizuku.manager")) } catch (_: Exception) {}
+                        }
+                        .setNegativeButton("选择目标目录") { _, _ -> pickGameTargetTree.launch(null) }
+                        .setNeutralButton("取消", null)
+                        .show()
+                    return@launch
+                }
+                return@launch
+            }
+
+            deployViaShell(modDirs)
+        }
+    }
+
+    /**
+     * 纯 SAF 通道：用 DocumentFile API 逐个复制文件/目录到目标树。
+     */
+    private suspend fun deployViaSaf(targetTree: DocumentFile, modDirs: List<String>): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                var success = 0
+                modDirs.forEachIndexed { idx, name ->
+                    val srcDir = modSourceTree!!.findFile(name) ?: return@forEachIndexed
+                    // 在目标树下创建/获取同名目录
+                    var dstDir = targetTree.findFile(name)
+                    if (dstDir == null) {
+                        dstDir = targetTree.createDirectory(name)
+                    }
+                    if (dstDir == null || !dstDir.isDirectory) {
+                        log("SAF: 无法在目标创建目录 $name")
+                        return@forEachIndexed
+                    }
+                    copyDocumentRecursively(srcDir, dstDir)
+                    success++
+                    runOnUiThread { binding.tvProgress.text = "进度：${idx + 1}/${modDirs.size}" }
+                }
+                log("SAF 部署完成：$success/${modDirs.size}")
+                true
+            } catch (t: Throwable) {
+                Log.w("BD2Deployer", "SAF deploy failed", t)
+                false
+            }
+        }
+    }
+
+    /** 递归复制 DocumentFile 目录内容 */
+    private fun copyDocumentRecursively(src: DocumentFile, dst: DocumentFile) {
+        src.listFiles()?.forEach { child ->
+            if (child.isDirectory) {
+                val sub = dst.createDirectory(child.name ?: return@forEach) ?: return@forEach
+                copyDocumentRecursively(child, sub)
             } else {
-                deployMods(src, modDirs)
+                // 文件：通过输入输出流复制
+                val outName = child.name ?: return@forEach
+                val existing = dst.findFile(outName)
+                existing?.delete()
+                val outFile = dst.createFile(child.type ?: "application/octet-stream", outName) ?: return@forEach
+                try {
+                    contentResolver.openInputStream(child.uri)?.use { input ->
+                        contentResolver.openOutputStream(outFile.uri)?.use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.w("BD2Deployer", "copy file failed: $outName", t)
+                }
             }
         }
     }
 
     /**
-     * 执行实际的 Mod 部署
-     * @param sourceParent 包含 Mod 子目录的父 DocumentFile
-     * @param modNames Mod 子目录的名称列表
+     * Shell 通道（Shizuku/Root）：用 cp 命令复制。
      */
-    private suspend fun deployMods(sourceParent: DocumentFile, modNames: List<String>) {
-        log("发现 ${modNames.size} 个 Mod 目录: ${modNames.joinToString(", ")}")
-
-        // 1) 先备份现有文件
-        log("开始备份将被替换的目录...")
+    private suspend fun deployViaShell(modDirs: List<String>) {
+        log("使用 Shizuku/Root 通道部署...")
+        // 备份
         val slot = withContext(Dispatchers.IO) {
-            backupMgr.backup(modNames, "/storage/emulated/0/Android/data/com.neowizgames.game.browndust2")
+            backupMgr.backup(modDirs, "/storage/emulated/0/Android/data/com.neowizgames.game.browndust2")
         }
         log("备份完成：${slot.name}")
 
-        // 2) 逐个复制 Mod 目录到游戏目录
-        var successCount = 0
-        var failCount = 0
-
-        val results = withContext(Dispatchers.IO) {
-            val list = mutableListOf<Pair<String, Boolean>>()
-            modNames.forEach { modName ->
-                val modDoc = sourceParent.findFile(modName)
-                if (modDoc == null || !modDoc.isDirectory) {
-                    log("警告：找不到 Mod 目录 $modName")
-                    list.add(modName to false)
-                    return@forEach
-                }
-
-                val realPath = realPathFromTreeUri(modDoc)
-                if (realPath.isNullOrBlank()) {
-                    log("无法解析路径: $modName")
-                    list.add(modName to false)
-                    return@forEach
-                }
-
-                val targetPath = "$gameTargetDir/$modName"
-                log("复制: $realPath -> $targetPath")
-
-                // 先删除目标目录（如果存在），再复制
-                val cmd = "rm -rf '$targetPath' && cp -a '$realPath' '$gameTargetDir/'"
-                val res = ShizukuHelper.run(cmd)
-                val ok = res != null && res.third
-                list.add(modName to ok)
-                if (!ok) {
-                    log("失败: $modName (${res?.second ?: "无返回"})")
-                }
+        var success = 0
+        modDirs.forEachIndexed { idx, name ->
+            val srcDir = modSourceTree!!.findFile(name) ?: return@forEachIndexed
+            val realPath = realPathFromTreeUri(srcDir)
+            if (realPath.isNullOrBlank()) {
+                log("无法解析路径：$name")
+                return@forEachIndexed
             }
-            list
+            val targetPath = "$gameTargetDir/$name"
+            val cmd = "rm -rf '$targetPath' && cp -a '$realPath' '$gameTargetDir/'"
+            val res = ShizukuHelper.run(cmd)
+            if (res != null && res.third) success++
+            runOnUiThread { binding.tvProgress.text = "进度：${idx + 1}/${modDirs.size}" }
         }
-
-        results.forEach { (name, ok) ->
-            if (ok) successCount++ else failCount++
-        }
-
-        log("=== 部署完成 ===")
-        log("成功: $successCount, 失败: $failCount")
-        toast("部署完成：成功 $successCount 个，失败 $failCount 个")
+        log("Shell 部署完成：$success/${modDirs.size}")
+        toast("部署完成（Shell）")
     }
 
-    /**
-     * 将 SAF DocumentFile 的 tree URI 解析为真实文件系统路径。
-     */
+    private fun promptShizukuAuth() {
+        AlertDialog.Builder(this)
+            .setTitle("需要 Shizuku 授权")
+            .setMessage("本应用需要通过 Shizuku 获取文件操作权限。\n\n" +
+                    "请按以下步骤操作：\n" +
+                    "1. 确保已开启 Shizuku（无线调试 / ADB 启动）\n" +
+                    "2. 在弹出的 Shizuku 授权窗口中点击「允许」\n" +
+                    "3. 若未弹出，请手动打开 Shizuku App 授权\n\n" +
+                    "授权后再次点击部署按钮即可。")
+            .setPositiveButton("去授权") { _, _ ->
+                ShizukuHelper.requestPermission()
+                try { startActivity(packageManager.getLaunchIntentForPackage("moe.shizuku.manager")) } catch (_: Exception) {}
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
     private fun realPathFromTreeUri(doc: DocumentFile): String? {
         val p = doc.uri.path ?: return null
         val seg = p.substringAfter("document/", "")
@@ -303,9 +346,7 @@ class MainActivity : AppCompatActivity() {
                 .show()
             return
         }
-        val items = slots.map {
-            "${it.name}  ·  ${it.formattedTime()}  ·  ${it.entries.size} 项"
-        }.toTypedArray()
+        val items = slots.map { "${it.name}  ·  ${it.formattedTime()}  ·  ${it.entries.size} 项" }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("备份/恢复（按时间倒序）")
             .setItems(items) { _, which -> showSlotAction(slots[which]) }
@@ -316,42 +357,21 @@ class MainActivity : AppCompatActivity() {
     private fun showSlotAction(slot: BackupManager.BackupSlot) {
         AlertDialog.Builder(this)
             .setTitle(slot.name)
-            .setMessage("创建于 ${slot.formattedTime()}\n共 ${slot.entries.size} 个目录项\n\n可一键恢复到游戏目录（覆盖当前文件）。")
-            .setPositiveButton("恢复到此备份") { _, _ -> restoreSlot(slot) }
-            .setNegativeButton("删除该备份") { _, _ ->
-                if (backupMgr.delete(slot)) toast("已删除备份 ${slot.name}") else toast("删除失败")
-            }
+            .setMessage("创建于 ${slot.formattedTime()}\n共 ${slot.entries.size} 个目录项\n路径：${slot.dir.absolutePath}\n\n可一键恢复到游戏目录（覆盖当前文件）。")
+            .setPositiveButton("恢复") { _, _ -> restoreSlot(slot) }
+            .setNegativeButton("删除") { _, _ -> if (backupMgr.delete(slot)) toast("已删除") else toast("删除失败") }
             .setNeutralButton("取消", null)
             .show()
     }
 
     private fun restoreSlot(slot: BackupManager.BackupSlot) {
-        if (!ShizukuHelper.hasPermission()) {
-            if (ShizukuHelper.isShizukuAvailable()) {
-                AlertDialog.Builder(this)
-                    .setTitle("需要 Shizuku 授权")
-                    .setMessage("恢复备份也需要 Shizuku 权限，请先授权。")
-                    .setPositiveButton("去授权") { _, _ ->
-                        ShizukuHelper.requestPermission()
-                        try {
-                            startActivity(packageManager.getLaunchIntentForPackage("moe.shizuku.manager"))
-                        } catch (_: Exception) {}
-                    }
-                    .setNegativeButton("取消", null)
-                    .show()
-            } else if (ShizukuHelper.isRootAvailable()) {
-                toast("使用 Root 权限执行")
-            } else {
-                toast("无可用的执行环境")
-            }
+        if (!ShizukuHelper.hasPermission() && gameTargetTree == null) {
+            promptShizukuAuth()
             return
         }
-
         scope.launch {
-            val ok = withContext(Dispatchers.IO) {
-                backupMgr.restore(slot, "/storage/emulated/0/Android/data/com.neowizgames.game.browndust2")
-            }
-            log(if (ok) "已恢复备份 ${slot.name}" else "恢复备份 ${slot.name} 部分失败，请查看日志")
+            val ok = withContext(Dispatchers.IO) { backupMgr.restore(slot, gameTargetDir) }
+            log(if (ok) "已恢复备份 ${slot.name}" else "恢复 ${slot.name} 部分失败")
             toast(if (ok) "恢复完成" else "恢复完成（有错误）")
         }
     }
