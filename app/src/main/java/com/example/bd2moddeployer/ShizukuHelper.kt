@@ -41,20 +41,14 @@ object ShizukuHelper {
     }
 
     fun requestPermission() {
-        if (!isShizukuAvailable()) return
-        try {
-            // Shizuku 13+ 新 API：requestPermission(int, OnRequestPermissionResultListener)
-            Shizuku.requestPermission(1001, object : Shizuku.OnRequestPermissionResultListener {
-                override fun onRequestPermissionResult(code: Int, result: Int) {
-                    permRequested = (code == 1001)
-                }
-            })
-        } catch (_: Throwable) {
-            // 旧版 API 兼容
-            try { Shizuku::class.java.getMethod("requestPermission", Int::class.javaPrimitiveType)
-                .invoke(null, 1001) } catch (_: Throwable) { }
-        }
+    if (!isShizukuAvailable()) return
+    try {
+        Shizuku.requestPermission(1001)
+        permRequested = true
+    } catch (e: Exception) {
+        Log.e(TAG, "请求 Shizuku 权限失败", e)
     }
+}
 
     /**
      * 执行 shell 命令，返回 (stdout, stderr, success)。
