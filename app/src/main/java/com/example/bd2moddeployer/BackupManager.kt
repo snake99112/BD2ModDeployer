@@ -11,7 +11,7 @@ import java.util.Locale
 /**
  * 备份管理器。
  *
- * 策略：每次部署（覆盖）前，对“将被替换的游戏子目录”做一次性备份到应用私有目录
+ * 策略：每次部署（覆盖）前，对"将被替换的游戏子目录"做一次性备份到应用私有目录
  *   /data/data/<本应用>/files/backups/<yyyyMMdd_HHmmss>/<相对子目录>...
  * 并记录 manifest.json（含游戏包、各备份子目录相对路径、时间）。
  * 后期可一键恢复：把备份目录 cp 回游戏 UnityCache/Shared 对应位置。
@@ -39,7 +39,7 @@ class BackupManager(private val ctx: Context) {
             ?: emptyList()
     }
 
-    /** 对给定“将被覆盖的游戏子目录相对路径列表”执行备份。relativeDirs 如 ["char0001","stage02"] */
+    /** 对给定"将被覆盖的游戏子目录相对路径列表"执行备份。relativeDirs 如 ["char0001","stage02"] */
     fun backup(relativeDirs: List<String>, gameRoot: String): BackupSlot {
         val slot = BackupSlot(
             name = "backup_${sdf.format(Date())}",
@@ -54,12 +54,11 @@ class BackupManager(private val ctx: Context) {
             val dst = File(slotDir, entry.relativePath).parentFile!!
             dst.mkdirs()
             // cp -a 保留属性；若源不存在则跳过（首次部署时无原文件）
-            ShizukuHelper.shell("cp -a '$src'/ '$dst/' 2>/dev/null || true").also { r ->
-                entry.backupSuccess = r.ok || r.stderr.contains("cannot stat").not()
-            }
+            val result = ShizukuHelper.runAsShell("cp -a '$src'/ '$dst/' 2>/dev/null || true")
+            entry.backupSuccess = result != null && !result.contains("[ERR]")
         }
-        slot.slotDir = slotDir.absolutePath
-        File(slotDir, MANIFEST).writeText(gson.toJson(slot))
+        // 注意：slot 是 val，不能重新赋值。直接使用 slotDir 路径写入 manifest
+        File(slotDir, MANIFEST).writeText(gson.toJson(slot.copy(slotDir = slotDir.absolutePath)))
         return slot
     }
 
@@ -72,8 +71,8 @@ class BackupManager(private val ctx: Context) {
             val src = File(slotDir, entry.relativePath).absolutePath
             val dst = "$gameRoot/$SHARED_REL/${File(entry.relativePath).parent ?: ""}".trimEnd('/')
             if (File(src).exists()) {
-                val r = ShizukuHelper.shell("mkdir -p '$dst' && cp -a '$src'/ '$dst/'")
-                if (!r.ok) allOk = false
+                val result = ShizukuHelper.runAsShell("mkdir -p '$dst' && cp -a '$src'/ '$dst/'")
+                if (result == null || result.contains("[ERR]")) allOk = false
             }
         }
         return allOk
