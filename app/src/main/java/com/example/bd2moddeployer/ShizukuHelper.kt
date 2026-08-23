@@ -45,8 +45,8 @@ object ShizukuHelper {
     try {
         Shizuku.requestPermission(1001)
         permRequested = true
-    } catch (e: Exception) {
-        Log.e(TAG, "请求 Shizuku 权限失败", e)
+    } catch (_: Exception) {
+        // 忽略异常
     }
 }
 
