@@ -1,71 +1,93 @@
 package com.example.bd2moddeployer
 
 import android.content.Context
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import android.content.pm.PackageManager
+import rikka.shizuku.Shizuku
+import java.lang.reflect.Method
 
+/**
+ * 双通道执行助手：
+ *  - 优先 Shizuku（adb/shell 身份，免 Root）执行 shell 命令
+ *  - Shizuku 不可用/未授权时回落到 Root (su)
+ *
+ * 说明：
+ *  Shizuku 13.x 的 newProcess 为 private，本类通过反射调用，
+ *  避免在 MainActivity 中直接 import 已不可见的 API。
+ */
 object ShizukuHelper {
+    const val PERM_CODE = 1001
 
-    private var isShizukuAvailable = false
+    @Volatile private var shizukuReady = false
+    @Volatile private var rootReady = false
 
-    fun init(context: Context) {
-        isShizukuAvailable = checkRootAccess()
-    }
-
-    private fun checkRootAccess(): Boolean {
-        return try {
-            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "echo test"))
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-            val output = reader.readLine()
-            process.waitFor()
-            output == "test"
-        } catch (e: Exception) {
-            false
+    // ---------- 初始化 ----------
+    fun init(ctx: Context) {
+        try {
+            Shizuku.addBinderReceivedListenerSticky(object : Shizuku.OnBinderReceivedListener {
+                override fun onBinderReceived() {
+                    shizukuReady = Shizuku.pingBinder()
+                }
+            })
+            Shizuku.addBinderDeadListener(object : Shizuku.OnBinderDeadListener {
+                override fun onBinderDead() { shizukuReady = false }
+            })
+            shizukuReady = Shizuku.pingBinder()
+        } catch (e: Throwable) {
+            shizukuReady = false
         }
+        rootReady = checkRoot()
     }
 
-    fun isAvailable(): Boolean {
-        return isShizukuAvailable
-    }
+    private fun checkRoot(): Boolean = try {
+        val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "echo ok"))
+        p.inputStream.bufferedReader().readLine() == "ok"
+    } catch (_: Throwable) { false }
 
-    fun hasPermission(): Boolean {
-        return isShizukuAvailable
-    }
+    // ---------- 状态查询 ----------
+    fun isShizukuAvailable(): Boolean = shizukuReady
+    fun isRootAvailable(): Boolean = rootReady
+
+    fun hasPermission(): Boolean =
+        if (shizukuReady) Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        else rootReady
 
     fun requestPermission() {
-        // 对于 root 方式，不需要请求权限，静默执行
-        // 这里保留空实现以保持接口兼容
-    }
-
-    fun runAsShell(command: String): String? {
-        if (!isShizukuAvailable) return null
-        
-        return try {
-            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
-            val result = StringBuilder()
-            
-            BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    result.append(line).append("\n")
-                }
-            }
-            
-            BufferedReader(InputStreamReader(process.errorStream)).use { reader ->
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    result.append("[ERR] ").append(line).append("\n")
-                }
-            }
-            
-            process.waitFor()
-            result.toString()
-        } catch (e: Exception) {
-            e.message
+        if (shizukuReady && Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+            Shizuku.requestPermission(PERM_CODE)
         }
     }
 
-    fun getVersion(): Int {
-        return if (isShizukuAvailable) 1 else -1
+    // ---------- 核心：执行 shell ----------
+    /**
+     * 返回 Triple(stdout, stderr, exitOk)；
+     * 优先 Shizuku（免 root），否则 root，都没有返回 null。
+     */
+    fun run(cmd: String): Triple<String?, String?, Boolean>? {
+        if (shizukuReady && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+            try {
+                val p = newProcess(arrayOf("sh", "-c", cmd))
+                val out = p.inputStream.bufferedReader().use { it.readText() }
+                val err = p.errorStream.bufferedReader().use { it.readText() }
+                p.waitFor()
+                return Triple(out, err, true)
+            } catch (e: Throwable) { /* fallthrough to root */ }
+        }
+        if (rootReady) {
+            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+            val out = p.inputStream.bufferedReader().use { it.readText() }
+            val err = p.errorStream.bufferedReader().use { it.readText() }
+            p.waitFor()
+            return Triple(out, err, true)
+        }
+        return null
+    }
+
+    /** 反射调用 private Shizuku.newProcess(String[] command, String[] env, String dir)。 */
+    private fun newProcess(args: Array<String>): Process {
+        val m: Method = Shizuku::class.java.getDeclaredMethod(
+            "newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java
+        )
+        m.isAccessible = true
+        return m.invoke(null, args, null, null) as Process
     }
 }

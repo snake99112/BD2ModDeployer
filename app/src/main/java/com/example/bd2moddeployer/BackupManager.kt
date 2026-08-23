@@ -23,10 +23,8 @@ class BackupManager(private val ctx: Context) {
     private val gson = Gson()
     private val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
 
-    /** 应用私有备份根目录。 */
     fun backupsRoot(): File = File(ctx.filesDir, "backups").also { it.mkdirs() }
 
-    /** 当前备份清单（每个备份槽 = 一个目录，含 manifest）。 */
     fun listBackups(): List<BackupSlot> {
         val root = backupsRoot()
         return root.listFiles()
@@ -39,7 +37,7 @@ class BackupManager(private val ctx: Context) {
             ?: emptyList()
     }
 
-    /** 对给定"将被覆盖的游戏子目录相对路径列表"执行备份。relativeDirs 如 ["char0001","stage02"] */
+    /** 对给定"将被覆盖的游戏子目录相对路径列表"执行备份。 */
     fun backup(relativeDirs: List<String>, gameRoot: String): BackupSlot {
         val slot = BackupSlot(
             name = "backup_${sdf.format(Date())}",
@@ -53,11 +51,11 @@ class BackupManager(private val ctx: Context) {
             val src = "$gameRoot/$SHARED_REL/$entry.relativePath".trimEnd('/')
             val dst = File(slotDir, entry.relativePath).parentFile!!
             dst.mkdirs()
-            // cp -a 保留属性；若源不存在则跳过（首次部署时无原文件）
-            val result = ShizukuHelper.runAsShell("cp -a '$src'/ '$dst/' 2>/dev/null || true")
-            entry.backupSuccess = result != null && !result.contains("[ERR]")
+            // cp -a 保留属性；源不存在则跳过（首次部署无原文件）
+            val res = ShizukuHelper.run("cp -a '$src'/ '$dst/' 2>/dev/null || true")
+            entry.backupSuccess = res != null && res.third &&
+                !res.second.orEmpty().contains("Permission denied")
         }
-        // 注意：slot 是 val，不能重新赋值。直接使用 slotDir 路径写入 manifest
         File(slotDir, MANIFEST).writeText(gson.toJson(slot.copy(slotDir = slotDir.absolutePath)))
         return slot
     }
@@ -71,15 +69,15 @@ class BackupManager(private val ctx: Context) {
             val src = File(slotDir, entry.relativePath).absolutePath
             val dst = "$gameRoot/$SHARED_REL/${File(entry.relativePath).parent ?: ""}".trimEnd('/')
             if (File(src).exists()) {
-                val result = ShizukuHelper.runAsShell("mkdir -p '$dst' && cp -a '$src'/ '$dst/'")
-                if (result == null || result.contains("[ERR]")) allOk = false
+                val res = ShizukuHelper.run("mkdir -p '$dst' && cp -a '$src'/ '$dst/'")
+                if (res == null || !res.third) allOk = false
             }
         }
         return allOk
     }
 
-    /** 删除某备份槽。 */
-    fun delete(slot: BackupSlot): Boolean = runCatching { File(slot.slotDir).deleteRecursively() }.getOrDefault(false)
+    fun delete(slot: BackupSlot): Boolean =
+        runCatching { File(slot.slotDir).deleteRecursively() }.getOrDefault(false)
 
     companion object {
         const val MANIFEST = "manifest.json"
@@ -93,7 +91,8 @@ class BackupManager(private val ctx: Context) {
         val slotDir: String,
         val entries: List<BackupEntry>
     ) {
-        fun formattedTime(): String = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(createdAt))
+        fun formattedTime(): String =
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(createdAt))
     }
 
     data class BackupEntry(val relativePath: String, var backupSuccess: Boolean = false)
