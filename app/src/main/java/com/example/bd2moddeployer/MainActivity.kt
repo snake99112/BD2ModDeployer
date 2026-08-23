@@ -30,9 +30,8 @@ class MainActivity : AppCompatActivity() {
     private val scope = CoroutineScope(Dispatchers.Main)
     private val backupMgr by lazy { BackupManager(this) }
 
-    /** 游戏外部存储根：/storage/emulated/0/Android/data/<包>/ */
-    private val gameRoot: String
-        get() = "/storage/emulated/0/Android/data/${getString(R.string.target_package)}"
+    /** 游戏目标目录（固定路径） */
+    private val gameTargetDir = "/storage/emulated/0/Android/data/com.neowizgames.game.browndust2/files/UnityCache/Shared"
 
     /** 已选 Mod 源目录的 DocumentFile（SAF 树 URI）。 */
     private var modSourceTree: DocumentFile? = null
@@ -47,7 +46,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 安装全局崩溃捕获器，闪退时写日志到 /sdcard/Download/
+        // 全局崩溃捕获
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
                 val crashFile = File(
@@ -81,7 +80,6 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // 初始化 Shizuku（双通道：Shizuku 免 root / root 兜底）
         ShizukuHelper.init(this)
 
         binding.btnPickMod.setOnClickListener { pickTree.launch(null) }
@@ -100,7 +98,6 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    // ====================== 状态刷新 ======================
     private fun refreshStatus() {
         val shizukuOnline = ShizukuHelper.isShizukuAvailable()
         val rootAvailable = ShizukuHelper.isRootAvailable()
@@ -136,12 +133,6 @@ class MainActivity : AppCompatActivity() {
 
     // ====================== 部署流程 ======================
     private fun onDeploy() {
-        val pkg = runCatching { getString(R.string.target_package) }.getOrNull()
-        if (pkg.isNullOrBlank()) {
-            toast("strings.xml 缺少 target_package")
-            return
-        }
-
         val src = modSourceTree
         if (src == null) {
             toast("请先选择 Mod 源文件夹")
@@ -189,49 +180,105 @@ class MainActivity : AppCompatActivity() {
 
         // ---- 有权限，开始部署 ----
         scope.launch {
-            val gameShared = "$gameRoot/${BackupManager.SHARED_REL}"
+            log("=== 开始部署 ===")
+            log("目标目录: $gameTargetDir")
 
-            // 1) 扫描源目录顶层子项（IO 操作）
-            val entries = withContext(Dispatchers.IO) {
-                src.listFiles().orEmpty().map { it.name ?: "" }.filter { it.isNotEmpty() }
-            }
-            if (entries.isEmpty()) {
-                toast("源目录为空")
-                return@launch
+            // 1) 扫描源目录，找到所有直接子文件夹（Mod 文件夹）
+            val modDirs = withContext(Dispatchers.IO) {
+                src.listFiles()
+                    ?.filter { it.isDirectory }
+                    ?.map { it.name ?: "" }
+                    ?.filter { it.isNotEmpty() }
+                    ?: emptyList()
             }
 
-            // 2) 先备份（IO 操作）
-            log("开始备份将被替换的 ${entries.size} 项...")
-            val slot = withContext(Dispatchers.IO) {
-                backupMgr.backup(entries, gameRoot)
-            }
-            log("备份槽：${slot.name}（${slot.entries.count { it.backupSuccess }}/${slot.entries.size} 项有原文件）")
-
-            // 3) 逐个复制（IO 操作，但 log 要在主线程调用）
-            var fail = 0
-            val results = withContext(Dispatchers.IO) {
-                val list = mutableListOf<Pair<String, Boolean>>()
-                src.listFiles()?.forEach { doc ->
-                    val name = doc.name ?: return@forEach
-                    val real = realPathFromTreeUri(doc)
-                    if (real.isNullOrBlank()) {
-                        list.add(name to false)
-                        return@forEach
+            if (modDirs.isEmpty()) {
+                // 如果直接子项没有文件夹，可能是用户选了 Shared 的上层目录
+                // 尝试找 Shared 文件夹
+                val sharedFolder = src.findFile("Shared")
+                if (sharedFolder != null && sharedFolder.isDirectory) {
+                    log("检测到 Shared 文件夹，进入其内部查找 Mod 目录...")
+                    val innerDirs = withContext(Dispatchers.IO) {
+                        sharedFolder.listFiles()
+                            ?.filter { it.isDirectory }
+                            ?.map { it.name ?: "" }
+                            ?.filter { it.isNotEmpty() }
+                            ?: emptyList()
                     }
-                    val dst = "$gameShared/$name"
-                    val res = ShizukuHelper.run("mkdir -p '$dst' && cp -a '$real' '$dst'")
-                    list.add(name to (res != null && res.third))
+                    if (innerDirs.isEmpty()) {
+                        toast("Mod 源文件夹内没有找到任何 Mod 子目录")
+                        return@launch
+                    }
+                    // 用 innerDirs 继续，但源路径要指向 Shared 里面
+                    deployMods(sharedFolder, innerDirs)
+                } else {
+                    toast("Mod 源文件夹内没有找到任何 Mod 子目录")
+                    return@launch
                 }
-                list
+            } else {
+                deployMods(src, modDirs)
             }
-            // 在主线程统一输出日志
-            results.forEach { (name, success) ->
-                if (success) log("部署: $name ✓")
-                else { fail++; log("部署失败: $name") }
-            }
-            log("部署完成（成功 ${entries.size - fail}/$fail 失败）。可在「备份/恢复」中一键还原。")
-            toast("部署完成")
         }
+    }
+
+    /**
+     * 执行实际的 Mod 部署
+     * @param sourceParent 包含 Mod 子目录的父 DocumentFile
+     * @param modNames Mod 子目录的名称列表
+     */
+    private suspend fun deployMods(sourceParent: DocumentFile, modNames: List<String>) {
+        log("发现 ${modNames.size} 个 Mod 目录: ${modNames.joinToString(", ")}")
+
+        // 1) 先备份现有文件
+        log("开始备份将被替换的目录...")
+        val slot = withContext(Dispatchers.IO) {
+            backupMgr.backup(modNames, "/storage/emulated/0/Android/data/com.neowizgames.game.browndust2")
+        }
+        log("备份完成：${slot.name}")
+
+        // 2) 逐个复制 Mod 目录到游戏目录
+        var successCount = 0
+        var failCount = 0
+
+        val results = withContext(Dispatchers.IO) {
+            val list = mutableListOf<Pair<String, Boolean>>()
+            modNames.forEach { modName ->
+                val modDoc = sourceParent.findFile(modName)
+                if (modDoc == null || !modDoc.isDirectory) {
+                    log("警告：找不到 Mod 目录 $modName")
+                    list.add(modName to false)
+                    return@forEach
+                }
+
+                val realPath = realPathFromTreeUri(modDoc)
+                if (realPath.isNullOrBlank()) {
+                    log("无法解析路径: $modName")
+                    list.add(modName to false)
+                    return@forEach
+                }
+
+                val targetPath = "$gameTargetDir/$modName"
+                log("复制: $realPath -> $targetPath")
+
+                // 先删除目标目录（如果存在），再复制
+                val cmd = "rm -rf '$targetPath' && cp -a '$realPath' '$gameTargetDir/'"
+                val res = ShizukuHelper.run(cmd)
+                val ok = res != null && res.third
+                list.add(modName to ok)
+                if (!ok) {
+                    log("失败: $modName (${res?.second ?: "无返回"})")
+                }
+            }
+            list
+        }
+
+        results.forEach { (name, ok) ->
+            if (ok) successCount++ else failCount++
+        }
+
+        log("=== 部署完成 ===")
+        log("成功: $successCount, 失败: $failCount")
+        toast("部署完成：成功 $successCount 个，失败 $failCount 个")
     }
 
     /**
@@ -301,7 +348,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         scope.launch {
-            val ok = withContext(Dispatchers.IO) { backupMgr.restore(slot, gameRoot) }
+            val ok = withContext(Dispatchers.IO) {
+                backupMgr.restore(slot, "/storage/emulated/0/Android/data/com.neowizgames.game.browndust2")
+            }
             log(if (ok) "已恢复备份 ${slot.name}" else "恢复备份 ${slot.name} 部分失败，请查看日志")
             toast(if (ok) "恢复完成" else "恢复完成（有错误）")
         }
