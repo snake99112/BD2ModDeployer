@@ -17,6 +17,7 @@ android {
 
     buildFeatures {
         viewBinding = true
+        dataBinding = false
     }
 
     buildTypes {
@@ -43,10 +44,10 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.documentfile:documentfile:1.0.1")
 
-    // Shizuku
+    // Shizuku - 使用正确的 Maven 坐标
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
 
-    // Gson for backup manifest
+    // Gson
     implementation("com.google.code.gson:gson:2.10.1")
 }
