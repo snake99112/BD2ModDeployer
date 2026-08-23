@@ -79,7 +79,7 @@ class MainActivity : AppCompatActivity() {
             }
             // 继续默认行为（杀掉进程）
             val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
-            if (defaultHandler != this) defaultHandler?.uncaughtException(thread, throwable)
+            defaultHandler?.uncaughtException(thread, throwable)
         }
 
         binding = ActivityMainBinding.inflate(layoutInflater)
