@@ -1,19 +1,24 @@
 package com.example.bd2moddeployer
 
 import android.content.Context
-import android.os.IBinder
-import rikka.shizuku.Shizuku
-import rikka.shizuku.ShizukuProvider
+import java.io.BufferedReader
+import java.io.InputStreamReader
 
 object ShizukuHelper {
 
     private var isShizukuAvailable = false
 
     fun init(context: Context) {
-        // 检查 Shizuku 是否可用
-        isShizukuAvailable = try {
-            Shizuku.pingBinder()
-            true
+        isShizukuAvailable = checkRootAccess()
+    }
+
+    private fun checkRootAccess(): Boolean {
+        return try {
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "echo test"))
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            val output = reader.readLine()
+            process.waitFor()
+            output == "test"
         } catch (e: Exception) {
             false
         }
@@ -23,18 +28,33 @@ object ShizukuHelper {
         return isShizukuAvailable
     }
 
+    fun hasPermission(): Boolean {
+        return isShizukuAvailable
+    }
+
+    fun requestPermission() {
+        // 对于 root 方式，不需要请求权限，静默执行
+        // 这里保留空实现以保持接口兼容
+    }
+
     fun runAsShell(command: String): String? {
         if (!isShizukuAvailable) return null
         
         return try {
-            // 通过 Shizuku 执行 shell 命令
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
             val result = StringBuilder()
-            val process = Shizuku.newProcess(arrayOf("sh", "-c", command), null, null)
             
-            process.inputStream.bufferedReader().use { reader ->
+            BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                 var line: String?
                 while (reader.readLine().also { line = it } != null) {
                     result.append(line).append("\n")
+                }
+            }
+            
+            BufferedReader(InputStreamReader(process.errorStream)).use { reader ->
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    result.append("[ERR] ").append(line).append("\n")
                 }
             }
             
@@ -46,18 +66,6 @@ object ShizukuHelper {
     }
 
     fun getVersion(): Int {
-        return try {
-            Shizuku.getVersion()
-        } catch (e: Exception) {
-            -1
-        }
-    }
-
-    fun addPermissionResultCallback(callback: Shizuku.OnRequestPermissionResultListener) {
-        Shizuku.addRequestPermissionResultListener(callback)
-    }
-
-    fun removePermissionResultCallback(callback: Shizuku.OnRequestPermissionResultListener) {
-        Shizuku.removeRequestPermissionResultListener(callback)
+        return if (isShizukuAvailable) 1 else -1
     }
 }
