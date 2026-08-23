@@ -25,11 +25,8 @@ jobs:
         with:
           gradle-version: '8.5'
 
-      - name: Grant execute permission
-        run: chmod +x gradlew
-
-      - name: Build with Gradle
-        run: ./gradlew assembleDebug --no-daemon
+      - name: Build with Gradle directly
+        run: gradle assembleDebug --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
