@@ -1,0 +1,31 @@
+# Gradle / 构建产物
+.gradle/
+build/
+app/build/
+*/build/
+**/build/
+
+# 本地 SDK 路径（每台机器不同）
+local.properties
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 产物 APK/AAB 不进库（由 CI 出）
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# 保留 Gradle wrapper（必须提交，否则 clone 后无法命令行构建）
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+!gradlew
+!gradlew.bat

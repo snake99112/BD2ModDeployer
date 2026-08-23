@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_title">BD2 Mod Deployer</string>
+    <string name="app_subtitle">Shizuku 覆盖布朗尘埃2 资源 + 自动备份/一键恢复</string>
+    <string name="btn_pick_mod">选择 Mod 源文件夹（Shared 目录）</string>
+    <string name="btn_deploy">部署 Mod（覆盖 → 自动备份被替换目录）</string>
+    <string name="btn_backup_restore">打开备份/恢复管理</string>
+    <string name="hint_no_folder">尚未选择 Mod 源文件夹</string>
+    <string name="target_package">com.neowizgames.game.browndust2</string>
+</resources>
