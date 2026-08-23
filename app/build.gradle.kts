@@ -44,4 +44,6 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.8.2")
     implementation("com.google.android.material:material:1.11.0")
     implementation("com.google.code.gson:gson:2.10.1")
+implementation("dev.rikka.shizuku:api:13.1.5")
+implementation("dev.rikka.shizuku:provider:13.1.5")
 }
